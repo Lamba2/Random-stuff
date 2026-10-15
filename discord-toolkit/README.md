@@ -1,6 +1,6 @@
 # Discord Community Toolkit
 
-One bot that covers what shop, game and community servers usually need. It's all set up with slash commands, so there are no config files to edit.
+One bot that covers what shop, game and community servers usually need: tickets, a shop with order tickets, giveaways, applications, verification and more. It's all set up with slash commands, so there are no config files to edit.
 
 | Feature | Commands |
 |---------|----------|
@@ -9,6 +9,9 @@ One bot that covers what shop, game and community servers usually need. It's all
 | **Role buttons**: members press a button to add or remove a role (up to 5 per panel) | `/roles panel` |
 | **Vouches**: 1–5 star reviews with a 24h cooldown per pair, averages, and an optional vouch channel | `/vouch give` · `/vouch view` · `/vouch channel` · `/vouch remove` |
 | **Stock**: an item list that updates itself, with optional pings when something is restocked | `/stock set` · `/stock remove` · `/stock view` · `/stock panel` |
+| **Shop**: a catalog with an order menu. Each order opens a private ticket with your payment instructions, staff mark it paid and delivered, a linked stock item counts down (unpaid orders hold stock for 30 minutes), and the buyer is asked for a vouch. Needs `/ticket setup` | `/shop add` · `/shop remove` · `/shop list` · `/shop payment` · `/shop panel` · `/shop orders` · `/shop deliver` · `/shop cancel` |
+| **Giveaways**: Join button that toggles entry, 1–20 winners drawn at random, optional required role, members who left or lost the role are skipped, keeps running through restarts, rerolls never repeat a winner | `/giveaway start` · `/giveaway end` · `/giveaway reroll` · `/giveaway cancel` · `/giveaway list` |
+| **Applications**: forms of up to 40 questions answered page by page, posted to a private review channel with Accept/Deny buttons, an optional role on accept, and a DM with the result (or `/application status` if DMs are closed) | `/application create` · `/application question add` · `/application question remove` · `/application question list` · `/application panel` · `/application edit` · `/application delete` · `/application status` |
 | **Dice** | `/roll 2d6+3` |
 
 Setup commands need the **Manage Server** permission. Data is saved in `data/store.json`, so no database is needed.
@@ -44,4 +47,4 @@ The bot only runs while `npm start` is running. To keep it online around the clo
 npm test
 ```
 
-There are 53 tests. They run every feature against a simulated Discord, covering permissions, double clicks, deleted channels and roles, closed DMs, and corrupted data files.
+There are 160 tests. They run every feature against a simulated Discord, covering permissions, double clicks, deleted channels and roles, closed DMs, and corrupted data files.

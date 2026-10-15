@@ -1,6 +1,7 @@
 const test = require('node:test');
+const { EventEmitter } = require('node:events');
 const assert = require('node:assert/strict');
-const { Collection, PermissionFlagsBits: P } = require('discord.js');
+const { Collection, Events, PermissionFlagsBits: P } = require('discord.js');
 const { lastText, isEphemeral, tick, PermissionsBitField } = require('./fakes');
 const {
   world, restart, driver, formId, apps, shownModal, inputs, lastComponents, posts, reviewButtons, ids, answerFieldsOf,
@@ -258,7 +259,7 @@ test('long answers are split across fields and messages without losing a charact
   assert.match(last.content, /part \d of \d/);
 });
 
-test('huge applications are attached as a .txt; without Attach Files they are split instead', async () => {
+test('huge applications are attached as a .txt; without Attach Files they are refused, not flooded', async () => {
   const { w, d } = setup();
   const id = await makeForm(d, w, { questions: 40, style: 'paragraph' });
   const answer = n => `A${n}:` + 'z'.repeat(3990);
@@ -272,15 +273,32 @@ test('huge applications are attached as a .txt; without Attach Files they are sp
   assert.match(all[0].embeds[0].description, /all 40 answers are in the attached file/);
   assert.deepEqual(ids(all[0]), ['application:accept:1', 'application:deny:1']);
 
+  // Attach Files lost after setup: refuse instead of posting ~30 messages, and keep the answers
   w.review.botPerms = withoutPerms(P.AttachFiles);
-  await applyAll(d, w.bob, id, answer);
+  const refused = await applyAll(d, w.bob, id, answer);
+  assert.match(lastText(refused), new RegExp(`too long to post as messages.*\\*\\*Attach Files\\*\\* permission in <#${w.review.id}>`));
+  assert.equal(posts(w.review).length, 1, 'nothing more posted');
+  assert.equal(apps(w).length, 1);
+  assert.deepEqual(w.ctx.store.guild(w.guild.id).applications.posting, {});
+  const retry = lastComponents(refused)[0];
+  assert.equal(retry.label, 'Try again');
+
+  w.review.botPerms = PermissionsBitField.All;
+  assert.match(lastText(await d.press(w.bob, retry.custom_id)), /was sent/);
   const bobs = posts(w.review).slice(1);
-  assert.ok(bobs.length > 3, 'split into many messages');
-  assert.ok(bobs.every(m => !m.payload.files));
-  const joined = {};
-  for (const m of bobs) for (const e of m.embeds) for (const f of e.fields || []) if (/^\d+\. /.test(f.name)) joined[f.name.split('.')[0]] = (joined[f.name.split('.')[0]] || '') + f.value;
-  for (let n = 0; n < 40; n++) assert.equal(joined[n + 1], answer(n));
-  assert.equal(reviewButtons(w.review).at(-1), bobs.at(-1));
+  assert.equal(bobs.length, 1);
+  assert.equal(bobs[0].payload.files[0].name, 'application-2.txt', 'the refused attempt used no application number');
+  assert.ok(bobs[0].payload.files[0].attachment.toString('utf8').includes(answer(39)));
+});
+
+test('without Attach Files, an application that fits in a few messages still posts', async () => {
+  const { w, d } = setup();
+  const id = await makeForm(d, w, { questions: 5, style: 'paragraph' });
+  w.review.botPerms = withoutPerms(P.AttachFiles);
+  const done = await applyAll(d, w.alice, id, () => 'y'.repeat(2000));
+  assert.match(lastText(done), /was sent/);
+  assert.ok(posts(w.review).length > 1 && posts(w.review).length <= 3);
+  assertWithinDiscordLimits(w.review);
 });
 
 test('a blank required answer re-asks that page with the other answers kept', async () => {
@@ -336,6 +354,7 @@ test('double clicks: Apply twice shares one draft, the last page twice posts onc
 test('unfinished applications expire and stale modals are rejected', async () => {
   const { w, d } = setup();
   w.ctx.applicationDraftTtlMs = 20;
+  w.ctx.applicationModalTtlMs = 20;
   const id = await makeForm(d, w, { questions: 7 });
   const first = shownModal(await d.press(w.alice, `application:apply:${id}`));
   const page1 = await d.submit(w.alice, first.custom_id, { q0: 'a', q1: 'b', q2: 'c', q3: 'd', q4: 'e' });
@@ -346,6 +365,7 @@ test('unfinished applications expire and stale modals are rejected', async () =>
   assert.match(lastText(await d.submit(w.alice, second.custom_id, { q5: 'f', q6: 'g' })), /expired/);
 
   w.ctx.applicationDraftTtlMs = 60_000;
+  w.ctx.applicationModalTtlMs = 60_000;
   const restarted = shownModal(await d.press(w.alice, `application:apply:${id}`));
   assert.equal(restarted.title, 'Staff (1/2)');
   assert.notEqual(restarted.custom_id, first.custom_id, 'a new draft');
@@ -353,6 +373,38 @@ test('unfinished applications expire and stale modals are rejected', async () =>
   assert.match(lastText(await d.submit(w.alice, first.custom_id, { q0: 'old', q1: 'old', q2: 'old', q3: 'old', q4: 'old' })), /expired/);
   assert.equal(posts(w.review).length, 0);
   assert.equal(apps(w).length, 0);
+});
+
+test('opening a page gives the open modal its own, longer window', async () => {
+  const { w, d } = setup();
+  w.ctx.applicationDraftTtlMs = 100;
+  w.ctx.applicationModalTtlMs = 1000;
+  const id = await makeForm(d, w, { questions: 7 });
+  const first = shownModal(await d.press(w.alice, `application:apply:${id}`));
+  const page1 = await d.submit(w.alice, first.custom_id, { q0: 'a', q1: 'b', q2: 'c', q3: 'd', q4: 'e' });
+  await tick(60);
+  const second = shownModal(await d.press(w.alice, lastComponents(page1)[0].custom_id)); // before the saved page expires
+  await tick(80); // writing for longer than saved answers are kept
+  const done = await d.submit(w.alice, second.custom_id, { q5: 'f', q6: 'g' });
+  assert.match(lastText(done), /was sent/);
+  assert.deepEqual(answerFieldsOf(w.review).map(f => f.value), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+
+  // a single-page form written for longer than the draft TTL
+  const single = await makeForm(d, w, { name: 'Whitelist', questions: 2 });
+  const json = shownModal(await d.press(w.bob, `application:apply:${single}`));
+  await tick(150);
+  assert.match(lastText(await d.submit(w.bob, json.custom_id, { q0: 'x', q1: 'y' })), /was sent/);
+});
+
+test('an open modal still expires after its own window', async () => {
+  const { w, d } = setup();
+  w.ctx.applicationDraftTtlMs = 20;
+  w.ctx.applicationModalTtlMs = 40;
+  const id = await makeForm(d, w, { questions: 2 });
+  const json = shownModal(await d.press(w.alice, `application:apply:${id}`));
+  await tick(60);
+  assert.match(lastText(await d.submit(w.alice, json.custom_id, { q0: 'x', q1: 'y' })), /expired/);
+  assert.equal(posts(w.review).length, 0);
 });
 
 test('questions edited mid-application do not shift answers', async () => {
@@ -433,6 +485,81 @@ test('onReady is harmless with no applications data or a guild the bot left', as
   w.ctx.store.guild(w.guild.id);
   await application.onReady({ guilds: { cache: new Collection() } }, w.ctx);
   assert.deepEqual(g.applications.posting, {});
+});
+
+const fakeClient = guilds => Object.assign(new EventEmitter(), { guilds: { cache: new Collection(guilds.map(g => [g.id, g])) } });
+const longAnswers = json => Object.fromEntries(inputs(json).map(c => [c.custom_id, 'y'.repeat(2000)]));
+
+test('onReady leaves alone a post this process started after the restart', async () => {
+  const { w, d } = setup();
+  const id = await makeForm(d, w, { questions: 5, style: 'paragraph' });
+  const r = restart(w);
+  const d2 = driver(w, r.app, { route: r.route, ctx: () => r.ctx });
+  const send = w.review.send;
+  let release;
+  const gate = new Promise(res => { release = res; });
+  let sent = 0;
+  w.review.send = async payload => {
+    if (++sent === 2) await gate;
+    return send(payload);
+  };
+  // InteractionCreate is routed while ClientReady is still running every command's onReady
+  const first = shownModal(await d2.press(w.alice, `application:apply:${id}`));
+  const submitting = d2.submit(w.alice, first.custom_id, longAnswers(first));
+  await tick();
+  assert.equal(posts(w.review).length, 1);
+  await r.app.onReady(fakeClient([w.guild]), r.ctx);
+  assert.equal(posts(w.review).length, 1, 'part 1 kept');
+  release();
+  assert.match(lastText(await submitting), /was sent/);
+  const all = posts(w.review);
+  assert.ok(all.length >= 2);
+  assert.match(all[0].content, /New \*\*Staff\*\* application/);
+  assert.deepEqual(apps(w, r.ctx)[0].messageIds, all.map(m => m.id));
+  assert.deepEqual(r.ctx.store.guild(w.guild.id).applications.posting, {});
+});
+
+test('onReady keeps a cut-short post on record while its server is unavailable, then cleans up when it returns', async () => {
+  const { w, d } = setup();
+  const id = await makeForm(d, w, { questions: 5, style: 'paragraph' });
+  const send = w.review.send;
+  let sent = 0;
+  w.review.send = payload => (++sent === 2 ? new Promise(() => {}) : send(payload));
+  const first = shownModal(await d.press(w.alice, `application:apply:${id}`));
+  d.submit(w.alice, first.custom_id, longAnswers(first));
+  await tick();
+
+  const r = restart(w);
+  const posting = () => r.ctx.store.guild(w.guild.id).applications.posting;
+  w.guild.available = false; // an outage: discord.js fires ClientReady anyway after its guild wait
+  const client = fakeClient([w.guild]);
+  await r.app.onReady(client, r.ctx);
+  assert.equal(posts(w.review).length, 1, 'nothing deleted yet');
+  assert.equal(Object.keys(posting()).length, 1, 'record kept for later');
+
+  w.guild.available = true;
+  client.emit(Events.GuildAvailable, w.guild);
+  await tick();
+  assert.equal(posts(w.review).length, 0, 'removed once the server is back');
+  assert.deepEqual(posting(), {});
+});
+
+test('onReady keeps parts it failed to delete for the next startup', async () => {
+  const { w } = setup();
+  const part = await w.review.send({ content: 'Application #3, part 1 of 2' });
+  w.ctx.store.guild(w.guild.id).applications = { posting: { 3: { channelId: w.review.id, messageIds: [part.id, 'already-gone'] } } };
+  const del = w.review.messages.delete;
+  w.review.messages.delete = async mid => {
+    if (mid === part.id) throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+    return del(mid);
+  };
+  await application.onReady(fakeClient([w.guild]), w.ctx);
+  assert.deepEqual(w.ctx.store.guild(w.guild.id).applications.posting, { 3: { channelId: w.review.id, messageIds: [part.id] } });
+
+  w.review.messages.delete = del;
+  await application.onReady(fakeClient([w.guild]), w.ctx);
+  assert.equal(posts(w.review).length, 0);
+  assert.deepEqual(w.ctx.store.guild(w.guild.id).applications.posting, {});
 });
 
 // ---------- failures while sending ----------

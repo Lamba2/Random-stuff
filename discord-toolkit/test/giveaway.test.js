@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PermissionFlagsBits: P } = require('discord.js');
+const { ChannelType, PermissionFlagsBits: P } = require('discord.js');
 const { lastText, isEphemeral, PermissionsBitField } = require('./fakes');
 const { world, restart, quiet, settle, embedOf, lastEdit, unix, MAX_TIMER } = require('./giveaway-helpers');
 const { parseDuration, drawWinners } = require('../src/commands/giveaway');
@@ -114,6 +114,22 @@ test('start uses the current channel, treats @everyone as no requirement, and ch
   const category = w.guild.textChannel('Events', { type: 4 });
   const j = await w.cmd(w.admin, 'start', { prize: 'Nitro', duration: '1h' }, category);
   assert.match(lastText(j), /Pick a text channel/);
+});
+
+test('start in a thread or voice chat asks for a text channel; announcement channels work', async () => {
+  const w = world();
+  for (const type of [ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread, ChannelType.GuildVoice]) {
+    const place = w.guild.textChannel(`place-${type}`, { type });
+    assert.ok(place.isTextBased(), 'Discord treats it as text-based');
+    const i = await w.cmd(w.admin, 'start', { prize: 'Nitro', duration: '3d' }, place);
+    assert.match(lastText(i), /Pick a text channel with the `channel` option/);
+    assert.equal(place.history.length, 0);
+  }
+  assert.equal(w.time.pending, 0);
+
+  const news = w.guild.textChannel('news', { type: ChannelType.GuildAnnouncement });
+  const { message } = await w.start({ channel: news });
+  assert.equal(message.channel, news);
 });
 
 // ---------- joining ----------
@@ -374,6 +390,25 @@ test('a deleted giveaway message or channel cancels the giveaway instead of draw
   assert.equal(w.time.pending, 0);
 });
 
+test('a giveaway post deleted while the bot runs is noticed even though discord.js still has it cached', async () => {
+  const w = world();
+  const timed = await w.start({ prize: 'Timed' });
+  const ended = await w.start({ prize: 'Manual' });
+  const alice = w.member('alice');
+  await w.press(alice, timed.message);
+  await w.press(alice, ended.message);
+  await w.general.messages.delete(timed.message.id);
+  await w.general.messages.delete(ended.message.id);
+  assert.equal(await w.general.messages.fetch(timed.message.id), timed.message, 'the stale copy is still cached');
+
+  const i = await w.cmd(w.admin, 'end', { message_id: ended.message.id });
+  assert.match(lastText(i), /was deleted, so I cancelled/);
+  await w.time.advance(HOUR);
+  assert.equal(w.gw(timed.message.id).status, 'cancelled');
+  assert.equal(w.gw(ended.message.id).status, 'cancelled');
+  assert.equal(announcements(w.general).length, 0, 'nobody is congratulated on a giveaway that was called off');
+});
+
 test('a failed announcement is reported to the admin, and the embed still shows the winner', async () => {
   const w = world();
   const { message } = await w.start();
@@ -413,6 +448,45 @@ test('a giveaway in a server the bot has left waits instead of crashing', async 
   await w.time.advance(HOUR);
   assert.equal(w.gw(message.id).status, 'running');
   assert.equal(announcements(w.general).length, 0);
+});
+
+test('an outage holds a due giveaway until the server is back instead of cancelling it', async () => {
+  const w = world();
+  const { message } = await w.start();
+  const alice = w.member('alice');
+  await w.press(alice, message);
+
+  w.guild.available = false;
+  await w.time.advance(HOUR + 5 * MIN);
+  assert.equal(w.gw(message.id).status, 'running');
+  assert.equal(announcements(w.general).length, 0);
+
+  w.guild.available = true;
+  await w.time.advance(MIN);
+  assert.equal(w.gw(message.id).status, 'ended');
+  assert.deepEqual(w.gw(message.id).winners, [alice.id]);
+  assert.equal(announcements(w.general).length, 1);
+});
+
+test('a server that is still unavailable at startup keeps its overdue giveaways', async () => {
+  const w = world();
+  const { message } = await w.start();
+  const alice = w.member('alice');
+  await w.press(alice, message);
+
+  // an unavailable guild is cached as a stub with no channels
+  const channels = [...w.guild.channels.cache];
+  w.guild.channels.cache.clear();
+  w.guild.available = false;
+  await restart(w, w.time.now() + 2 * HOUR);
+  await w.time.advance(0);
+  assert.equal(w.gw(message.id).status, 'running');
+
+  for (const [id, ch] of channels) w.guild.channels.cache.set(id, ch);
+  w.guild.available = true;
+  await w.time.advance(MIN);
+  assert.equal(w.gw(message.id).status, 'ended');
+  assert.deepEqual(w.gw(message.id).winners, [alice.id]);
 });
 
 // ---------- restarts and long timers ----------

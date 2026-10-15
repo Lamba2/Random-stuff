@@ -12,6 +12,9 @@ const SECTIONS = [
   ['🏷️ Role buttons', '`/roles panel` posts up to 5 buttons members press to add or remove roles'],
   ['⭐ Vouches', '`/vouch give` · `/vouch view` · `/vouch channel` (admin) · `/vouch remove` (admin)'],
   ['📦 Stock', '`/stock set` · `/stock remove` · `/stock view` · `/stock panel` posts a list that updates itself, with optional restock pings'],
+  ['🛒 Shop', '`/shop add` · `/shop remove` · `/shop list` · `/shop payment` (admin) · `/shop panel` (admin) posts a catalog; picking a product opens a private order ticket with **Mark paid** and **Delivered** buttons · `/shop orders` · `/shop deliver` · `/shop cancel` (admin). Needs `/ticket setup` first'],
+  ['🎉 Giveaways', '`/giveaway start` posts a giveaway with a Join button (durations like `1h30m`, up to 30 days, optional required role) · `/giveaway end` · `/giveaway reroll` · `/giveaway cancel` · `/giveaway list`'],
+  ['📝 Applications', '`/application create` makes a form · `/application question add` / `remove` / `list` (up to 40 questions) · `/application panel` posts the Apply button · `/application edit` · `/application delete` · `/application status` lets applicants check on theirs'],
   ['🎲 Dice', '`/roll 2d6+3`'],
 ];
 

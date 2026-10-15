@@ -1,8 +1,9 @@
 const {
   SlashCommandBuilder, InteractionContextType, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
   ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, AttachmentBuilder, MessageFlags, RESTJSONErrorCodes,
-  PermissionFlagsBits: P,
+  PermissionFlagsBits: P, Events,
 } = require('discord.js');
+const { randomUUID } = require('node:crypto');
 const { ephemeral, isAdmin, botMember, roleProblem, grantProblem, cantPost } = require('../lib/util');
 
 const MAX_FORMS = 25;
@@ -13,6 +14,7 @@ const LABEL_MAX = 45;
 const ANSWER_MAX = { short: 1000, paragraph: 4000 };
 const REASON_MAX = 1000;
 const DRAFT_TTL = 30 * 60 * 1000;
+const MODAL_TTL = 2 * 60 * 60 * 1000; // Discord closes the modal on submit, so typed answers are lost if the draft expired meanwhile
 const MAX_REVIEW_MESSAGES = 3; // longer applications go in a .txt instead of flooding the review channel
 const MESSAGE_CHARS = 6000;
 const KEEP_DECIDED = 500;
@@ -83,6 +85,7 @@ const drafts = new Map();
 const submitting = new Set();
 const deciding = new Set();
 let draftSeq = 0;
+const BOOT = randomUUID(); // tells posts started by this process apart from ones a restart cut short
 
 const clean = text => String(text ?? '').replace(/\s+/g, ' ').trim();
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
@@ -91,6 +94,7 @@ const panelText = raw => raw?.replace(/\\n/g, '\n').trim() || null;
 const pageCount = draft => Math.ceil(draft.questions.length / PER_PAGE);
 const draftKey = (guildId, formId, userId) => `${guildId}:${formId}:${userId}`;
 const ttl = ctx => ctx.applicationDraftTtlMs ?? DRAFT_TTL;
+const modalTtl = ctx => ctx.applicationModalTtlMs ?? MODAL_TTL;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 function section(ctx, guildId) {
@@ -377,8 +381,13 @@ function reviewChannelProblem(guild, form, me) {
   return cantPost(channel, me);
 }
 
+function showPage(interaction, ctx, draft) {
+  draft.expiresAt = Date.now() + modalTtl(ctx);
+  return interaction.showModal(pageModal(draft));
+}
+
 const resumeDraft = (interaction, ctx, draft) =>
-  (draft.page < pageCount(draft) ? interaction.showModal(pageModal(draft)) : finish(interaction, ctx, draft));
+  (draft.page < pageCount(draft) ? showPage(interaction, ctx, draft) : finish(interaction, ctx, draft));
 
 async function apply(interaction, ctx, [formId]) {
   const s = section(ctx, interaction.guildId);
@@ -403,10 +412,10 @@ async function apply(interaction, ctx, [formId]) {
   const fresh = {
     id: (++draftSeq).toString(36), guildId: guild.id, formId, userId: user.id, formName: form.name,
     questions: form.questions.map(q => ({ ...q })), // later edits to the form don't shift answers mid-application
-    answers: [], page: 0, expiresAt: Date.now() + ttl(ctx),
+    answers: [], page: 0,
   };
   drafts.set(key, fresh);
-  return interaction.showModal(pageModal(fresh));
+  return showPage(interaction, ctx, fresh);
 }
 
 async function resume(interaction, ctx, [formId]) {
@@ -538,6 +547,7 @@ function applicationText(form, id, user, { questions, answers }) {
   return `${lines.join('\n')}\n`;
 }
 
+// Returns null when the application needs a .txt but files can't be attached.
 function reviewPayloads({ form, id, user, member, draft, color, canAttach }) {
   const facts = [{ name: 'Applicant', value: `${user} · ${user.tag}`, inline: true }];
   if (user.createdTimestamp) facts.push({ name: 'Account created', value: when(user.createdTimestamp), inline: true });
@@ -551,7 +561,8 @@ function reviewPayloads({ form, id, user, member, draft, color, canAttach }) {
     button(`application:deny:${id}`, 'Deny', '✖️', ButtonStyle.Danger));
 
   const messages = pack(answerFields(draft), embedChars(header.toJSON()));
-  if (messages.length > MAX_REVIEW_MESSAGES && canAttach) {
+  if (messages.length > MAX_REVIEW_MESSAGES) {
+    if (!canAttach) return null;
     header.setDescription(`This application is too long to show here, so all ${draft.questions.length} answers are in the attached file.`);
     const file = new AttachmentBuilder(Buffer.from(applicationText(form, id, user, draft), 'utf8'), { name: `application-${id}.txt` });
     return [{ content: intro, embeds: [header], files: [file], components: [decide], allowedMentions: { parse: [] } }];
@@ -571,10 +582,12 @@ async function postReview(interaction, ctx, s, form, draft) {
   const closed = reviewChannelProblem(guild, form, me);
   if (closed) return closed;
   const channel = guild.channels.cache.get(form.reviewChannelId);
-  const id = s.nextAppId++;
+  const id = s.nextAppId;
   const payloads = reviewPayloads({ form, id, user, member: interaction.member, draft, color: ctx.color, canAttach: !cantPost(channel, me, { files: true }) });
+  if (!payloads) return `it's too long to post as messages, so staff need to give me the **Attach Files** permission in ${channel}.`;
+  s.nextAppId++;
   // Tracked while posting so that onReady can remove a post a restart cut short.
-  const posting = { channelId: channel.id, messageIds: [] };
+  const posting = { channelId: channel.id, messageIds: [], boot: BOOT };
   s.posting[id] = posting;
   ctx.store.save();
   try {
@@ -798,20 +811,36 @@ async function execute(interaction, ctx) {
   }
 }
 
+// True once the leftover parts are gone or can't be reached any more, so the record can go.
+async function removePartial(guild, p) {
+  if (!guild || !p?.channelId) return true; // the bot left the server, or the record is unusable
+  if (guild.available === false) return false; // an outage: retry when the guild comes back
+  const channel = guild.channels.cache.get(p.channelId);
+  if (!channel) return true;
+  const ids = p.messageIds || [];
+  const results = await Promise.allSettled(ids.map(mid => channel.messages.delete(mid)));
+  const gone = [RESTJSONErrorCodes.UnknownMessage, RESTJSONErrorCodes.UnknownChannel];
+  p.messageIds = ids.filter((_, n) => results[n].status === 'rejected' && !gone.includes(results[n].reason?.code));
+  return !p.messageIds.length;
+}
+
+async function cleanUpPosting(client, ctx, guildId) {
+  const posting = ctx.store.data.guilds[guildId]?.applications?.posting;
+  if (!posting || typeof posting !== 'object') return;
+  // posts started after this process came up are still being sent, not cut short
+  const leftovers = Object.entries(posting).filter(([, p]) => p?.boot !== BOOT);
+  if (!leftovers.length) return;
+  for (const [id, p] of leftovers) {
+    if (await removePartial(client.guilds.cache.get(guildId), p)) delete posting[id];
+  }
+  ctx.store.save();
+}
+
 // A restart in the middle of posting would leave part of an application with no buttons; take it down.
 async function onReady(client, ctx) {
-  let changed = false;
-  for (const [guildId, g] of Object.entries(ctx.store.data.guilds)) {
-    const posting = g?.applications?.posting;
-    if (!posting || typeof posting !== 'object') continue;
-    for (const [id, p] of Object.entries(posting)) {
-      const channel = client.guilds.cache.get(guildId)?.channels.cache.get(p.channelId);
-      if (channel) await Promise.allSettled((p.messageIds || []).map(mid => channel.messages.delete(mid)));
-      delete posting[id];
-      changed = true;
-    }
-  }
-  if (changed) ctx.store.save();
+  client.on?.(Events.GuildAvailable, guild => cleanUpPosting(client, ctx, guild.id)
+    .catch(err => console.error('Cleaning up a cut-short application failed:', err)));
+  for (const guildId of Object.keys(ctx.store.data.guilds)) await cleanUpPosting(client, ctx, guildId);
 }
 
 module.exports = {

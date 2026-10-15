@@ -14,6 +14,8 @@ const DOUBLE_CLICK = 1500;
 const RETRY_AFTER = 60 * SECOND;
 const KEEP_ENDED = 30 * DAY;
 const GREY = 0x99aab5;
+// Threads auto-archive and drop out of the cache on restart, and voice chats aren't giveaway channels.
+const POSTABLE = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
 
 const data = new SlashCommandBuilder()
   .setName('giveaway')
@@ -25,7 +27,7 @@ const data = new SlashCommandBuilder()
     .addStringOption(o => o.setName('prize').setDescription('What the winners get').setRequired(true).setMaxLength(200))
     .addStringOption(o => o.setName('duration').setDescription('How long it runs, e.g. 30m, 2h, 1d or 1h30m (10s to 30d)').setRequired(true).setMaxLength(30))
     .addIntegerOption(o => o.setName('winners').setDescription('How many winners (default 1)').setMinValue(1).setMaxValue(20))
-    .addChannelOption(o => o.setName('channel').setDescription('Where to post it (default: this channel)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+    .addChannelOption(o => o.setName('channel').setDescription('Where to post it (default: this channel)').addChannelTypes(...POSTABLE))
     .addRoleOption(o => o.setName('required_role').setDescription('Only members with this role can enter')))
   .addSubcommand(s => s
     .setName('end')
@@ -210,6 +212,8 @@ function arm(client, ctx, guildId, messageId, minDelay = 0) {
     if (current.endsAt > now(ctx)) return arm(client, ctx, guildId, messageId); // long giveaways chain timers
     const guild = client.guilds.cache.get(guildId);
     if (!guild) return; // bot was removed from the server; picked up again on the next start
+    // during an outage the channel cache is empty, which finish() would read as a deleted giveaway
+    if (!guild.available) return arm(client, ctx, guildId, messageId, RETRY_AFTER);
     return finish(guild, ctx, messageId).catch(err => console.error('Ending a giveaway failed:', err));
   }, Math.min(wait, MAX_TIMER)));
 }
@@ -289,7 +293,8 @@ async function finish(guild, ctx, messageId) {
       return { outcome: 'vanished', gw };
     }
     try {
-      await channel.messages.fetch(messageId);
+      // force: the cached copy outlives a deletion, since the Guilds intent never hears about it
+      await channel.messages.fetch({ message: messageId, force: true });
     } catch (err) {
       // whoever deleted the giveaway post most likely meant to call it off
       if (err.code === RESTJSONErrorCodes.UnknownMessage || err.code === RESTJSONErrorCodes.UnknownChannel) {
@@ -334,7 +339,7 @@ async function start(interaction, ctx) {
   const prize = interaction.options.getString('prize', true).replace(/\s+/g, ' ').trim();
   if (!prize) return ephemeral(interaction, 'Tell me what the prize is.');
   const channel = interaction.options.getChannel('channel') ?? interaction.channel;
-  if (!channel?.isTextBased?.()) return ephemeral(interaction, 'Pick a text channel with the `channel` option.');
+  if (!POSTABLE.includes(channel?.type)) return ephemeral(interaction, 'Pick a text channel with the `channel` option.');
   // otherwise Manage Server would let someone post through the bot where they can't post themselves
   if (!channel.permissionsFor(interaction.member)?.has([P.ViewChannel, P.SendMessages])) {
     return ephemeral(interaction, `You can only start giveaways in channels where you can send messages yourself, and ${channel} isn't one.`);

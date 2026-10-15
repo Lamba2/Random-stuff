@@ -32,6 +32,8 @@ const closing = new Set();
 
 const button = (id, label, emoji, style) =>
   new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(id).setLabel(label).setEmoji(emoji).setStyle(style));
+const closeButton = () => new ButtonBuilder().setCustomId('ticket:close').setLabel('Close').setEmoji('🔒').setStyle(ButtonStyle.Danger);
+const pad = n => String(n).padStart(4, '0');
 
 const isStaff = (member, cfg) => member.permissions.has(P.ManageGuild) || Boolean(cfg && member.roles.cache.has(cfg.staffRoleId));
 
@@ -71,6 +73,48 @@ async function setup(interaction, ctx) {
   return ephemeral(interaction, `Ticket panel posted in ${channel}. Staff role: ${staff}.${where}${logs}${pingWarning}`);
 }
 
+// Creates a private channel only `user`, staff and the bot can see, and records it as an open ticket so Close,
+// /ticket add and /ticket close work in it. The caller checks that tickets are set up and posts the first message.
+// name and topic are functions of the ticket number. Returns { channel, number, staffRole } or { error }.
+async function createTicketChannel(guild, user, ctx, { name, topic, reason, record = {} }) {
+  const g = ctx.store.guild(guild.id);
+  const cfg = g.tickets.config;
+  const me = await botMember(guild);
+  const number = ++g.tickets.counter;
+  ctx.store.save();
+  const category = cfg.categoryId ? guild.channels.cache.get(cfg.categoryId) : null;
+  const staffRole = guild.roles.cache.get(cfg.staffRoleId);
+  const overwrites = [
+    { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [P.ViewChannel] },
+    { id: user.id, type: OverwriteType.Member, allow: MEMBER_PERMS },
+    { id: me.id, type: OverwriteType.Member, allow: [...MEMBER_PERMS, P.ManageChannels] },
+  ];
+  if (staffRole) overwrites.push({ id: staffRole.id, type: OverwriteType.Role, allow: MEMBER_PERMS });
+
+  let channel;
+  try {
+    channel = await guild.channels.create({
+      name: channelName(name(number)),
+      type: ChannelType.GuildText,
+      parent: category?.type === ChannelType.GuildCategory ? category.id : null,
+      permissionOverwrites: overwrites,
+      topic: topic(number),
+      reason,
+    });
+  } catch (err) {
+    console.error('Creating a ticket channel failed:', err);
+    const missing = me.permissions.missing(SERVER_PERMS_NEEDED);
+    if (err.code === RESTJSONErrorCodes.MissingPermissions && missing.length) {
+      return { error: `I couldn't create your ticket channel: I'm missing ${permList(missing)} on my role. Please let a server admin know.` };
+    }
+    return { error: "I couldn't create your ticket channel. Ask an admin to check my permissions and that the ticket category isn't full (50 channels max)." };
+  }
+
+  g.tickets.open[channel.id] = { ...record, ownerId: user.id, number, openedAt: Date.now() };
+  ctx.store.save();
+  return { channel, number, staffRole };
+}
+
 async function open(interaction, ctx) {
   const key = `${interaction.guildId}:${interaction.user.id}`;
   if (opening.has(key)) return ephemeral(interaction, 'Hang on, your ticket is already being created.');
@@ -79,53 +123,26 @@ async function open(interaction, ctx) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const { guild, user } = interaction;
     const g = ctx.store.guild(guild.id);
-    const cfg = g.tickets.config;
-    if (!cfg) return interaction.editReply('Tickets are not set up on this server yet.');
+    if (!g.tickets.config) return interaction.editReply('Tickets are not set up on this server yet.');
 
     for (const [id, t] of Object.entries(g.tickets.open)) {
-      if (t.ownerId !== user.id) continue;
+      if (t.ownerId !== user.id || t.kind) continue; // tickets other features open (shop orders) don't count
       if (guild.channels.cache.has(id)) return interaction.editReply(`You already have an open ticket: <#${id}>`);
       delete g.tickets.open[id]; // someone deleted the channel by hand
     }
 
-    const me = await botMember(guild);
-    const number = ++g.tickets.counter;
-    ctx.store.save();
-    const category = cfg.categoryId ? guild.channels.cache.get(cfg.categoryId) : null;
-    const staffRole = guild.roles.cache.get(cfg.staffRoleId);
-    const overwrites = [
-      { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [P.ViewChannel] },
-      { id: user.id, type: OverwriteType.Member, allow: MEMBER_PERMS },
-      { id: me.id, type: OverwriteType.Member, allow: [...MEMBER_PERMS, P.ManageChannels] },
-    ];
-    if (staffRole) overwrites.push({ id: staffRole.id, type: OverwriteType.Role, allow: MEMBER_PERMS });
-
-    let channel;
-    try {
-      channel = await guild.channels.create({
-        name: channelName(`ticket-${String(number).padStart(4, '0')}-${user.username}`),
-        type: ChannelType.GuildText,
-        parent: category?.type === ChannelType.GuildCategory ? category.id : null,
-        permissionOverwrites: overwrites,
-        topic: `Ticket #${number} for ${user.tag} (${user.id})`,
-        reason: `Ticket opened by ${user.tag}`,
-      });
-    } catch (err) {
-      console.error('Creating a ticket channel failed:', err);
-      const missing = me.permissions.missing(SERVER_PERMS_NEEDED);
-      if (err.code === RESTJSONErrorCodes.MissingPermissions && missing.length) {
-        return interaction.editReply(`I couldn't create your ticket channel: I'm missing ${permList(missing)} on my role. Please let a server admin know.`);
-      }
-      return interaction.editReply("I couldn't create your ticket channel. Ask an admin to check my permissions and that the ticket category isn't full (50 channels max).");
-    }
-
-    g.tickets.open[channel.id] = { ownerId: user.id, number, openedAt: Date.now() };
-    ctx.store.save();
+    const made = await createTicketChannel(guild, user, ctx, {
+      name: n => `ticket-${pad(n)}-${user.username}`,
+      topic: n => `Ticket #${n} for ${user.tag} (${user.id})`,
+      reason: `Ticket opened by ${user.tag}`,
+    });
+    if (made.error) return interaction.editReply(made.error);
+    const { channel, number, staffRole } = made;
     await channel.send({
       content: staffRole ? `${user} ${staffRole}` : `${user}`,
       embeds: [new EmbedBuilder().setColor(ctx.color).setTitle(`Ticket #${number}`)
         .setDescription('Tell us what you need and a staff member will be with you soon.\nPress **Close** when you are done.')],
-      components: [button('ticket:close', 'Close', '🔒', ButtonStyle.Danger)],
+      components: [new ActionRowBuilder().addComponents(closeButton())],
       allowedMentions: { users: [user.id], roles: staffRole ? [staffRole.id] : [] },
     });
     return interaction.editReply(`Your ticket is open: ${channel}`);
@@ -165,7 +182,7 @@ async function confirmClose(interaction, ctx) {
       embeds: [new EmbedBuilder().setColor(ctx.color).setDescription(`🔒 Closed by ${interaction.user}. This channel will be deleted in a few seconds.`)],
     });
 
-    const label = `ticket-${String(t.number).padStart(4, '0')}`;
+    const label = `ticket-${pad(t.number)}`;
     const { text, count, truncated } = await buildTranscript(channel, `Transcript for ticket #${t.number}`);
     const file = () => new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: `${label}.txt` });
     const cfg = g.tickets.config || {};
@@ -246,4 +263,7 @@ module.exports = {
   data,
   execute,
   buttons: { open, close: requestClose, confirm: confirmClose },
+  createTicketChannel,
+  closeButton,
+  isStaff,
 };

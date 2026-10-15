@@ -1,12 +1,16 @@
 // Extra fake behaviour the giveaway tests need on top of test/fakes.js: a controllable clock and timers,
 // a client with a guild cache, member fetches that can disagree with the (stale) member cache,
 // channel.messages.edit, and a way to simulate a bot restart.
-const { Collection, PermissionFlagsBits: P } = require('discord.js');
+const { Collection, ChannelType, PermissionFlagsBits: P } = require('discord.js');
 const { makeGuild, makeCtx, command, button } = require('./fakes');
 const { buildRouter } = require('../src/router');
 const { Store } = require('../src/store');
 
 const MAX_TIMER = 2 ** 31 - 1;
+const TEXT_BASED = [
+  ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice, ChannelType.GuildStageVoice,
+  ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread,
+];
 const MODULE = require.resolve('../src/commands/giveaway');
 
 const settle = async (rounds = 10) => {
@@ -79,12 +83,32 @@ function world() {
     if (!m) throw apiError(10007, 'Unknown Member');
     return m;
   };
+  // Like discord.js: sent messages are cached, a cached fetch never asks Discord, and nothing evicts a
+  // deleted message because the Guilds intent gets no MESSAGE_DELETE. Edits always go to Discord.
   const makeChannel = guild.textChannel;
   guild.textChannel = (name, opts) => {
     const ch = makeChannel(name, opts);
-    ch.messages.edit = async (id, payload) => (await ch.messages.fetch(id)).edit(payload);
+    ch.isTextBased = () => TEXT_BASED.includes(ch.type);
+    const cache = new Map();
+    const fromDiscord = ch.messages.fetch;
+    const send = ch.send;
+    ch.send = async payload => {
+      const m = await send(payload);
+      cache.set(m.id, m);
+      return m;
+    };
+    ch.messages.fetch = async arg => {
+      const single = typeof arg === 'string' ? { message: arg } : arg?.message ? arg : null;
+      if (!single) return fromDiscord(arg);
+      if (!single.force && cache.has(single.message)) return cache.get(single.message);
+      const m = await fromDiscord(single.message);
+      cache.set(m.id, m);
+      return m;
+    };
+    ch.messages.edit = async (id, payload) => (await fromDiscord(id)).edit(payload);
     return ch;
   };
+  guild.available = true;
 
   const w = { guild, client, present };
   attach(w, fakeTime(), makeCtx());
