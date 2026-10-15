@@ -1,8 +1,8 @@
 const {
   SlashCommandBuilder, InteractionContextType, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle,
+  EmbedBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, MessageFlags,
 } = require('discord.js');
-const { ephemeral, isAdmin, botMember, roleProblem, cantPost } = require('../lib/util');
+const { ephemeral, isAdmin, botMember, roleProblem, grantProblem, cantPost } = require('../lib/util');
 
 const data = new SlashCommandBuilder()
   .setName('verify')
@@ -17,11 +17,12 @@ const data = new SlashCommandBuilder()
 
 async function setup(interaction, ctx) {
   if (!isAdmin(interaction)) return ephemeral(interaction, 'You need the **Manage Server** permission to set up verification.');
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const channel = interaction.options.getChannel('channel', true);
   const role = interaction.options.getRole('role', true);
   const captcha = interaction.options.getBoolean('captcha') ?? true;
   const me = await botMember(interaction.guild);
-  const problem = roleProblem(role, me) || cantPost(channel, me);
+  const problem = grantProblem(interaction, role) || roleProblem(role, me) || cantPost(channel, me);
   if (problem) return ephemeral(interaction, problem);
 
   const g = ctx.store.guild(interaction.guildId);

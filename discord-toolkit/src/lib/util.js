@@ -26,6 +26,17 @@ function roleProblem(role, me) {
   return null;
 }
 
+// Why the person running a setup command may not hand out this role, or null if they may. Without this,
+// a mod with Manage Server could put an Admin role on a self-assign button and press it.
+function grantProblem(interaction, role) {
+  if (interaction.user.id === interaction.guild.ownerId) return null;
+  if (!interaction.memberPermissions?.has(P.ManageRoles)) return 'You need the **Manage Roles** permission to hand out roles.';
+  if (interaction.member.roles.highest.comparePositionTo(role) <= 0) {
+    return `You can only use roles below your own highest role, and **${role.name}** isn't.`;
+  }
+  return null;
+}
+
 const PERM_NAMES = {
   ViewChannel: 'View Channel',
   SendMessages: 'Send Messages',
@@ -76,4 +87,4 @@ function rollDice({ count, sides, modifier }, rng = Math.random) {
   return { rolls, total: rolls.reduce((a, b) => a + b, 0) + modifier };
 }
 
-module.exports = { ephemeral, isAdmin, botMember, roleProblem, cantPost, permList, channelName, stars, parseDice, rollDice };
+module.exports = { ephemeral, isAdmin, botMember, roleProblem, grantProblem, cantPost, permList, channelName, stars, parseDice, rollDice };

@@ -44,4 +44,4 @@ The bot only runs while `npm start` is running. To keep it online around the clo
 npm test
 ```
 
-There are 42 tests. They run every feature against a simulated Discord, covering permissions, double clicks, deleted channels and roles, closed DMs, and corrupted data files.
+There are 53 tests. They run every feature against a simulated Discord, covering permissions, double clicks, deleted channels and roles, closed DMs, and corrupted data files.

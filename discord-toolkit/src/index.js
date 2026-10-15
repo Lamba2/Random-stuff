@@ -7,6 +7,7 @@ const { buildRouter } = require('./router');
 const INVITE_PERMISSIONS = [
   P.ViewChannel, P.SendMessages, P.EmbedLinks, P.AttachFiles, P.ReadMessageHistory,
   P.ManageChannels, P.ManageRoles,
+  P.MentionEveryone, // lets staff and restock pings reach roles that aren't set to mentionable
 ];
 
 if (!config.token) {
@@ -18,7 +19,9 @@ const store = new Store(config.dataFile);
 const ctx = { store, color: config.color };
 const route = buildRouter(commands);
 // Guilds is the only intent needed: everything else arrives through interactions.
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// Nothing pings unless a message opts in: the bot holds Mention Everyone, and user text (vouch
+// comments, item names) must never be able to reach @everyone through it.
+const client = new Client({ intents: [GatewayIntentBits.Guilds], allowedMentions: { parse: [], repliedUser: false } });
 
 client.once(Events.ClientReady, async c => {
   console.log(`Logged in as ${c.user.tag}, in ${c.guilds.cache.size} server(s).`);

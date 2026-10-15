@@ -67,9 +67,16 @@ function makeTextChannel(guild, name, opts = {}) {
           if (!m) throw unknownMessage();
           return m;
         }
-        const { limit = 50, before } = arg || {};
-        const older = ch.history.filter(m => !before || BigInt(m.id) < BigInt(before));
-        const page = older.slice(-limit).reverse(); // API order: newest first
+        const { limit = 50, before, after } = arg || {};
+        ch.fetchCalls = (ch.fetchCalls || 0) + 1;
+        let page;
+        if (after !== undefined) {
+          // the messages right after `after`
+          page = ch.history.filter(m => BigInt(m.id) > BigInt(after)).slice(0, limit).reverse();
+        } else {
+          const older = ch.history.filter(m => !before || BigInt(m.id) < BigInt(before));
+          page = older.slice(-limit).reverse(); // API order: newest first
+        }
         return new Collection(page.map(m => [m.id, m]));
       },
       delete: async mid => {
@@ -83,7 +90,11 @@ function makeTextChannel(guild, name, opts = {}) {
       edit: async (who, options, extra) => { ch.permissionOverwrites.edits.push({ who, options, extra }); },
       delete: async (who, reason) => { ch.permissionOverwrites.deletes.push({ who, reason }); },
     },
-    delete: async () => { ch.deleted = true; guild.channels.cache.delete(ch.id); },
+    delete: async () => {
+      if (ch.failDelete) throw new Error('Service Unavailable');
+      ch.deleted = true;
+      guild.channels.cache.delete(ch.id);
+    },
   };
   guild.channels.cache.set(ch.id, ch);
   return ch;
@@ -136,6 +147,8 @@ function makeGuild({ botPerms = PermissionsBitField.All, botRolePosition = 10 } 
   guild.members = { me: guild.me, fetchMe: async () => guild.me };
   guild.textChannel = (name, opts) => makeTextChannel(guild, name, opts);
   guild.member = (username, { roles: r = [], perms = 0n } = {}) => makeMember(guild, makeUser(username), r, perms);
+  guild.owner = guild.member('owner', { perms: PermissionsBitField.All });
+  guild.ownerId = guild.owner.id;
   return guild;
 }
 
@@ -175,6 +188,7 @@ function makeInteraction({ type, guild, member, channel = null, commandName, sub
     },
     followUp: async p => {
       if (!i.replied && !i.deferred) throw new Error('InteractionNotReplied');
+      if (i.followUpFails) throw new Error('Unknown Webhook');
       calls.push(['followUp', p]);
     },
     update: async p => {

@@ -176,10 +176,112 @@ test('strangers cannot close a ticket, the owner can, with a transcript', async 
   assert.match(transcript, /helper: looking into it/);
   assert.equal(log.files[0].name, 'ticket-0001.txt');
   assert.equal(confirm.dms[0].userId, w.alice.id);
-  assert.equal(w.ctx.store.guild(w.guild.id).tickets.open[ch.id], undefined);
 
   await tick();
   assert.ok(ch.deleted, 'channel deleted after the delay');
+  assert.equal(w.ctx.store.guild(w.guild.id).tickets.open[ch.id], undefined, 'record dropped once the channel is gone');
+});
+
+test('setup refuses when the bot lacks a permission the ticket overwrites need', async () => {
+  const w = world();
+  w.guild.me.permissions = new PermissionsBitField(PermissionsBitField.All).remove(P.Administrator, P.AttachFiles);
+  const i = await setUp(w);
+  assert.match(lastText(i), /Attach Files/);
+  assert.equal(w.ctx.store.guild(w.guild.id).tickets.config, null);
+});
+
+test('setup warns when the staff role cannot be pinged', async () => {
+  const w = world();
+  w.guild.me.permissions = new PermissionsBitField(PermissionsBitField.All).remove(P.Administrator, P.MentionEveryone);
+  const quiet = await setUp(w);
+  assert.match(lastText(quiet), /won't notify/);
+  w.staffRole.mentionable = true;
+  const loud = await setUp(w);
+  assert.doesNotMatch(lastText(loud), /won't notify/);
+});
+
+test('with no log channel and closed DMs, the closer gets the transcript', async () => {
+  const w = world();
+  await setUp(w, { log_channel: undefined });
+  await openTicket(w, w.alice);
+  const [ch] = ticketChannels(w);
+  const confirm = button({ guild: w.guild, member: w.staff, channel: ch, customId: 'ticket:confirm' });
+  confirm.dmFails = true;
+  await route(confirm, w.ctx);
+  const handed = confirm.calls.find(([k]) => k === 'followUp');
+  assert.ok(handed, 'transcript handed to the closer');
+  assert.ok(isEphemeral(handed[1]));
+  assert.equal(handed[1].files[0].name, 'ticket-0001.txt');
+  await tick();
+  assert.ok(ch.deleted);
+});
+
+test('if the transcript cannot be saved anywhere, the ticket is kept', async () => {
+  const w = world();
+  await setUp(w);
+  await openTicket(w, w.alice);
+  const [ch] = ticketChannels(w);
+  w.logChannel.failSend = true;
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const confirm = button({ guild: w.guild, member: w.staff, channel: ch, customId: 'ticket:confirm' });
+    confirm.dmFails = true;
+    confirm.followUpFails = true;
+    await route(confirm, w.ctx);
+    await tick();
+    assert.equal(ch.deleted, false, 'channel kept');
+    assert.ok(w.ctx.store.guild(w.guild.id).tickets.open[ch.id], 'still an open ticket');
+    assert.match(ch.sent.at(-1).content, /Close cancelled/);
+
+    w.logChannel.failSend = false; // admin fixes the log channel, closes again
+    const retry = button({ guild: w.guild, member: w.staff, channel: ch, customId: 'ticket:confirm' });
+    await route(retry, w.ctx);
+    await tick();
+    assert.ok(ch.deleted);
+  } finally {
+    console.error = orig;
+  }
+});
+
+test('a failed channel delete leaves a ticket that can be closed again', async () => {
+  const w = world();
+  await setUp(w);
+  await openTicket(w, w.alice);
+  const [ch] = ticketChannels(w);
+  ch.failDelete = true;
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    await route(button({ guild: w.guild, member: w.alice, channel: ch, customId: 'ticket:confirm' }), w.ctx);
+    await tick();
+    assert.equal(ch.deleted, false);
+    assert.ok(w.ctx.store.guild(w.guild.id).tickets.open[ch.id], 'record kept so Close still works');
+    ch.failDelete = false;
+    const again = button({ guild: w.guild, member: w.alice, channel: ch, customId: 'ticket:close' });
+    await route(again, w.ctx);
+    assert.match(lastText(again), /Close this ticket/);
+    await route(button({ guild: w.guild, member: w.alice, channel: ch, customId: 'ticket:confirm' }), w.ctx);
+    await tick();
+    assert.ok(ch.deleted);
+  } finally {
+    console.error = orig;
+  }
+});
+
+test('channel create failing on missing permissions names them', async () => {
+  const w = world();
+  await setUp(w);
+  w.guild.me.permissions = new PermissionsBitField(PermissionsBitField.All).remove(P.Administrator, P.EmbedLinks);
+  w.guild.channels.create = async () => { const e = new Error('Missing Permissions'); e.code = 50013; throw e; };
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const i = await openTicket(w, w.alice);
+    assert.match(lastText(i), /missing \*\*Embed Links\*\*/);
+  } finally {
+    console.error = orig;
+  }
 });
 
 test('staff can close any ticket via /ticket close; closed DMs do not break closing', async () => {

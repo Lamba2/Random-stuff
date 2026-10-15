@@ -1,6 +1,6 @@
 const {
   SlashCommandBuilder, InteractionContextType, ChannelType, OverwriteType, PermissionFlagsBits: P,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, AttachmentBuilder, MessageFlags,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, AttachmentBuilder, MessageFlags, RESTJSONErrorCodes,
 } = require('discord.js');
 const { ephemeral, isAdmin, botMember, cantPost, permList, channelName } = require('../lib/util');
 const { buildTranscript } = require('../lib/transcript');
@@ -35,8 +35,12 @@ const button = (id, label, emoji, style) =>
 
 const isStaff = (member, cfg) => member.permissions.has(P.ManageGuild) || Boolean(cfg && member.roles.cache.has(cfg.staffRoleId));
 
+// Discord only lets a bot set channel overwrites for permissions it holds server-wide.
+const SERVER_PERMS_NEEDED = [P.ManageChannels, P.ManageRoles, ...MEMBER_PERMS];
+
 async function setup(interaction, ctx) {
   if (!isAdmin(interaction)) return ephemeral(interaction, 'You need the **Manage Server** permission to set up tickets.');
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const channel = interaction.options.getChannel('channel', true);
   const staff = interaction.options.getRole('staff_role', true);
   const category = interaction.options.getChannel('category');
@@ -44,8 +48,8 @@ async function setup(interaction, ctx) {
   if (staff.id === interaction.guildId) return ephemeral(interaction, 'Pick an actual staff role, not @everyone, or every member could read every ticket.');
 
   const me = await botMember(interaction.guild);
-  const missing = me.permissions.missing([P.ManageChannels, P.ManageRoles]);
-  if (missing.length) return ephemeral(interaction, `I need ${permList(missing)} in this server to create ticket channels.`);
+  const missing = me.permissions.missing(SERVER_PERMS_NEEDED);
+  if (missing.length) return ephemeral(interaction, `I need ${permList(missing)} server-wide (on my role) to create ticket channels.`);
   const problem = cantPost(channel, me) || (log && cantPost(log, me, { files: true }));
   if (problem) return ephemeral(interaction, problem);
 
@@ -59,8 +63,12 @@ async function setup(interaction, ctx) {
     components: [button('ticket:open', 'Open a ticket', '🎫', ButtonStyle.Primary)],
   });
   const where = category ? ` Tickets will be created in **${category.name}**.` : '';
-  const logs = log ? ` Transcripts go to ${log}.` : ' No log channel set, so transcripts are only DMed to the ticket owner.';
-  return ephemeral(interaction, `Ticket panel posted in ${channel}. Staff role: ${staff}.${where}${logs}`);
+  const logs = log ? ` Transcripts go to ${log}.` : ' No log channel set, so transcripts are DMed to the ticket owner (or handed to whoever closes it).';
+  // Bots can only ping a non-mentionable role with "Mention @everyone, @here, and All Roles".
+  const pingWarning = !staff.mentionable && !me.permissions.has(P.MentionEveryone)
+    ? `\n⚠️ New tickets won't notify ${staff}: give my role **Mention @everyone, @here, and All Roles** (or make ${staff} mentionable).`
+    : '';
+  return ephemeral(interaction, `Ticket panel posted in ${channel}. Staff role: ${staff}.${where}${logs}${pingWarning}`);
 }
 
 async function open(interaction, ctx) {
@@ -104,7 +112,11 @@ async function open(interaction, ctx) {
       });
     } catch (err) {
       console.error('Creating a ticket channel failed:', err);
-      return interaction.editReply("I couldn't create your ticket channel. Ask an admin to check that I have **Manage Channels** and **Manage Roles**, and that the ticket category isn't full (50 channels max).");
+      const missing = me.permissions.missing(SERVER_PERMS_NEEDED);
+      if (err.code === RESTJSONErrorCodes.MissingPermissions && missing.length) {
+        return interaction.editReply(`I couldn't create your ticket channel: I'm missing ${permList(missing)} on my role. Please let a server admin know.`);
+      }
+      return interaction.editReply("I couldn't create your ticket channel. Ask an admin to check my permissions and that the ticket category isn't full (50 channels max).");
     }
 
     g.tickets.open[channel.id] = { ownerId: user.id, number, openedAt: Date.now() };
@@ -154,31 +166,49 @@ async function confirmClose(interaction, ctx) {
     });
 
     const label = `ticket-${String(t.number).padStart(4, '0')}`;
-    const { text, count } = await buildTranscript(channel, `Transcript for ticket #${t.number}`);
+    const { text, count, truncated } = await buildTranscript(channel, `Transcript for ticket #${t.number}`);
     const file = () => new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: `${label}.txt` });
     const cfg = g.tickets.config || {};
+
+    // The channel is only deleted once the transcript has landed somewhere.
+    let saved = false;
     const log = cfg.logChannelId ? interaction.guild.channels.cache.get(cfg.logChannelId) : null;
     if (log?.isTextBased()) {
       const summary = new EmbedBuilder().setColor(ctx.color).setTitle(`Ticket #${t.number} closed`).setTimestamp()
         .addFields(
           { name: 'Opened by', value: `<@${t.ownerId}>`, inline: true },
           { name: 'Closed by', value: `${interaction.user}`, inline: true },
-          { name: 'Messages', value: String(count), inline: true },
+          { name: 'Messages', value: `${count}${truncated ? ' (oldest and newest kept)' : ''}`, inline: true },
         );
-      await log.send({ embeds: [summary], files: [file()] }).catch(err => console.error('Posting the transcript failed:', err.message));
+      saved = await log.send({ embeds: [summary], files: [file()] })
+        .then(() => true, err => { console.error('Posting the transcript failed:', err.message); return false; });
     }
-    await interaction.client.users
+    const dmed = await interaction.client.users
       .send(t.ownerId, { content: `Your ticket #${t.number} in **${interaction.guild.name}** was closed. Here's the transcript.`, files: [file()] })
-      .catch(() => {}); // DMs closed; the log channel still has it
-
-    delete g.tickets.open[channel.id];
-    ctx.store.save();
+      .then(() => true, () => false);
+    if (!saved && !dmed) {
+      saved = await interaction
+        .followUp({ content: "I couldn't post the transcript to a log channel or DM it to the ticket owner, so here it is. Download it before dismissing this.", files: [file()], flags: MessageFlags.Ephemeral })
+        .then(() => true, () => false);
+    }
+    if (!saved && !dmed) {
+      closing.delete(channel.id);
+      await channel.send("Close cancelled: I couldn't save the transcript anywhere, so I'm keeping this channel. An admin can run `/ticket setup` with a log channel I can post files in, then close again.");
+      return;
+    }
   } catch (err) {
     closing.delete(channel.id);
     throw err;
   }
+  // The record is only dropped once the channel is really gone, so a restart mid-close leaves a ticket
+  // that can simply be closed again instead of an orphan channel.
   setTimeout(() => {
     channel.delete(`Ticket closed by ${interaction.user.tag}`)
+      .then(() => {}, err => { if (err.code !== RESTJSONErrorCodes.UnknownChannel) throw err; })
+      .then(() => {
+        delete g.tickets.open[channel.id];
+        ctx.store.save();
+      })
       .catch(err => console.error('Deleting the ticket channel failed:', err.message))
       .finally(() => closing.delete(channel.id));
   }, ctx.ticketDeleteDelayMs ?? 5000);

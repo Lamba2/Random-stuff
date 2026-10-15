@@ -1,4 +1,6 @@
-const { SlashCommandBuilder, InteractionContextType, ChannelType, EmbedBuilder, RESTJSONErrorCodes } = require('discord.js');
+const {
+  SlashCommandBuilder, InteractionContextType, ChannelType, EmbedBuilder, RESTJSONErrorCodes, MessageFlags, PermissionFlagsBits: P,
+} = require('discord.js');
 const { ephemeral, isAdmin, botMember, cantPost } = require('../lib/util');
 
 const data = new SlashCommandBuilder()
@@ -46,19 +48,20 @@ async function refreshPanel(guild, ctx) {
   const g = ctx.store.guild(guild.id);
   const panel = g.stock.panel;
   if (!panel) return;
-  const channel = guild.channels.cache.get(panel.channelId);
-  if (!channel?.isTextBased()) {
+  // only forget the panel we failed on; /stock panel may have replaced it while we were waiting
+  const forget = () => {
+    if (g.stock.panel?.messageId !== panel.messageId) return;
     g.stock.panel = null;
     ctx.store.save();
-    return;
-  }
+  };
+  const channel = guild.channels.cache.get(panel.channelId);
+  if (!channel?.isTextBased()) return forget();
   try {
     const message = await channel.messages.fetch(panel.messageId);
     await message.edit({ embeds: [stockEmbed(g.stock.items, ctx.color)] });
   } catch (err) {
     if (err.code === RESTJSONErrorCodes.UnknownMessage) {
-      g.stock.panel = null; // panel was deleted; stop trying to update it
-      ctx.store.save();
+      forget(); // panel was deleted; stop trying to update it
     } else {
       console.error('Updating the stock panel failed:', err.message);
     }
@@ -104,12 +107,13 @@ async function remove(interaction, ctx) {
 async function panel(interaction, ctx) {
   const channel = interaction.options.getChannel('channel', true);
   const role = interaction.options.getRole('restock_ping');
-  const problem = cantPost(channel, await botMember(interaction.guild), { history: true });
+  const me = await botMember(interaction.guild);
+  const problem = cantPost(channel, me, { history: true });
   if (problem) return ephemeral(interaction, problem);
-  if (role && role.id === interaction.guildId) return ephemeral(interaction, "Pick a dedicated restock role instead of @everyone.");
+  if (role && role.id === interaction.guildId) return ephemeral(interaction, 'Pick a dedicated restock role instead of @everyone.');
   const g = ctx.store.guild(interaction.guildId);
-  const old = g.stock.panel;
   const message = await channel.send({ embeds: [stockEmbed(g.stock.items, ctx.color)] });
+  const old = g.stock.panel; // read after sending so concurrent /stock panel calls each retire the one they replace
   g.stock.panel = { channelId: channel.id, messageId: message.id };
   g.stock.notifyRoleId = role?.id ?? null;
   ctx.store.save();
@@ -117,7 +121,10 @@ async function panel(interaction, ctx) {
     const oldChannel = interaction.guild.channels.cache.get(old.channelId);
     oldChannel?.messages?.delete(old.messageId).catch(() => {}); // old panel would go stale otherwise
   }
-  return ephemeral(interaction, `Stock panel posted in ${channel}. It updates whenever you use /stock set or /stock remove.${role ? ` ${role} gets pinged on restocks.` : ''}`);
+  const pingWarning = role && !role.mentionable && !channel.permissionsFor(me)?.has(P.MentionEveryone)
+    ? `\n⚠️ Restock pings won't notify ${role}: give my role **Mention @everyone, @here, and All Roles** (or make ${role} mentionable).`
+    : '';
+  return ephemeral(interaction, `Stock panel posted in ${channel}. It updates whenever you use /stock set or /stock remove.${role ? ` ${role} gets pinged on restocks.` : ''}${pingWarning}`);
 }
 
 async function execute(interaction, ctx) {
@@ -126,6 +133,7 @@ async function execute(interaction, ctx) {
     return ephemeral(interaction, null, { embeds: [stockEmbed(ctx.store.guild(interaction.guildId).stock.items, ctx.color)] });
   }
   if (!isAdmin(interaction)) return ephemeral(interaction, 'You need the **Manage Server** permission to change stock.');
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral }); // panel edits and pings can take a moment
   if (sub === 'set') return set(interaction, ctx);
   if (sub === 'remove') return remove(interaction, ctx);
   if (sub === 'panel') return panel(interaction, ctx);

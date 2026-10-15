@@ -1,7 +1,7 @@
 const {
-  SlashCommandBuilder, InteractionContextType, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
+  SlashCommandBuilder, InteractionContextType, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags,
 } = require('discord.js');
-const { ephemeral, isAdmin, botMember, roleProblem, cantPost } = require('../lib/util');
+const { ephemeral, isAdmin, botMember, roleProblem, grantProblem, cantPost } = require('../lib/util');
 
 const data = new SlashCommandBuilder()
   .setName('roles')
@@ -20,6 +20,7 @@ const data = new SlashCommandBuilder()
 
 async function panel(interaction, ctx) {
   if (!isAdmin(interaction)) return ephemeral(interaction, 'You need the **Manage Server** permission to post role panels.');
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const channel = interaction.options.getChannel('channel', true);
   const roles = [];
   for (let i = 1; i <= 5; i++) {
@@ -27,7 +28,7 @@ async function panel(interaction, ctx) {
     if (role && !roles.some(r => r.id === role.id)) roles.push(role);
   }
   const me = await botMember(interaction.guild);
-  const problems = roles.map(r => roleProblem(r, me)).filter(Boolean);
+  const problems = roles.map(r => grantProblem(interaction, r) || roleProblem(r, me)).filter(Boolean);
   const postProblem = cantPost(channel, me);
   if (postProblem) problems.push(postProblem);
   if (problems.length) return ephemeral(interaction, problems.join('\n'));

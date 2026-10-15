@@ -75,12 +75,46 @@ test('fetchHistory pages through long channels and returns oldest first', async 
   const ch = g.textChannel('long');
   const u = { tag: 'alice', bot: false };
   for (let i = 0; i < 250; i++) ch.post(u, `msg ${i}`);
-  const all = await fetchHistory(ch);
-  assert.equal(all.length, 250);
-  assert.equal(all[0].content, 'msg 0');
-  assert.equal(all[249].content, 'msg 249');
-  const capped = await fetchHistory(ch, 120);
-  assert.equal(capped.length, 120);
+  const { messages, truncated } = await fetchHistory(ch);
+  assert.equal(messages.length, 250);
+  assert.equal(truncated, false);
+  assert.equal(messages[0].content, 'msg 0');
+  assert.equal(messages[249].content, 'msg 249');
+});
+
+test('fetchHistory keeps the opening messages of a ticket that is over the cap', async () => {
+  const g = makeGuild();
+  const ch = g.textChannel('huge');
+  const u = { tag: 'alice', bot: false };
+  for (let i = 0; i < 1500; i++) ch.post(u, `msg ${i}`);
+  const { messages, truncated } = await fetchHistory(ch);
+  assert.equal(truncated, true);
+  assert.equal(messages.length, 1000);
+  assert.equal(messages[0].content, 'msg 0', 'original request kept');
+  assert.equal(messages[99].content, 'msg 99');
+  assert.equal(messages[100].content, 'msg 600');
+  assert.equal(messages.at(-1).content, 'msg 1499');
+  const ids = messages.map(m => m.id);
+  assert.equal(new Set(ids).size, ids.length, 'no duplicates');
+  const text = formatTranscript(messages, { guildName: 'S', channelName: 'c', title: 'T', truncated });
+  assert.match(text, /some in between were left out/);
+});
+
+test('fetchHistory at exactly the cap reports nothing missing', async () => {
+  const g = makeGuild();
+  const ch = g.textChannel('exact');
+  const u = { tag: 'alice', bot: false };
+  for (let i = 0; i < 1000; i++) ch.post(u, `msg ${i}`);
+  const { messages, truncated } = await fetchHistory(ch);
+  assert.equal(messages.length, 1000);
+  assert.equal(truncated, false);
+  for (const n of [950, 900]) {
+    const c2 = g.textChannel(`c${n}`);
+    for (let i = 0; i < n; i++) c2.post(u, `m ${i}`);
+    const r = await fetchHistory(c2);
+    assert.equal(r.messages.length, n);
+    assert.equal(r.truncated, false, `${n} messages`);
+  }
 });
 
 test('formatTranscript includes embeds, attachments and the intent hint', () => {

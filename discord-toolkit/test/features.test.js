@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PermissionFlagsBits: P } = require('discord.js');
-const { makeGuild, command, button, modal, lastText, isEphemeral, makeCtx } = require('./fakes');
+const { makeGuild, command, button, modal, lastText, isEphemeral, makeCtx, PermissionsBitField } = require('./fakes');
 const { buildRouter } = require('../src/router');
 const { commands } = require('../src/commands');
 
@@ -10,10 +10,11 @@ const route = buildRouter(commands);
 function world() {
   const ctx = makeCtx();
   const guild = makeGuild({ botRolePosition: 10 });
+  const modRole = guild.makeRole('Mod', 9);
   return {
-    ctx, guild,
+    ctx, guild, modRole,
     general: guild.textChannel('general'),
-    admin: guild.member('admin', { perms: P.ManageGuild }),
+    admin: guild.member('admin', { roles: [modRole], perms: P.ManageGuild | P.ManageRoles }),
     alice: guild.member('alice'),
     bob: guild.member('bob'),
   };
@@ -24,10 +25,33 @@ function world() {
 test('verify setup refuses a role above the bot', async () => {
   const w = world();
   const high = w.guild.makeRole('Owner', 50);
-  const i = command({ guild: w.guild, member: w.admin, channel: w.general, commandName: 'verify', subcommand: 'setup', options: { channel: w.general, role: high } });
+  const i = command({ guild: w.guild, member: w.guild.owner, channel: w.general, commandName: 'verify', subcommand: 'setup', options: { channel: w.general, role: high } });
   await route(i, w.ctx);
   assert.match(lastText(i), /has to be above \*\*Owner\*\*/);
   assert.equal(w.ctx.store.guild(w.guild.id).verify.roleId, null);
+});
+
+test('setup commands cannot hand out roles the runner could not assign themselves', async () => {
+  const w = world();
+  const adminRole = w.guild.makeRole('Admin', 8); // below the bot, but powerful
+  const managerOnly = w.guild.member('botmanager', { perms: P.ManageGuild }); // Manage Server, no Manage Roles
+
+  const viaPanel = command({ guild: w.guild, member: managerOnly, channel: w.general, commandName: 'roles', subcommand: 'panel', options: { channel: w.general, role1: adminRole } });
+  await route(viaPanel, w.ctx);
+  assert.match(lastText(viaPanel), /Manage Roles/);
+  const viaVerify = command({ guild: w.guild, member: managerOnly, channel: w.general, commandName: 'verify', subcommand: 'setup', options: { channel: w.general, role: adminRole } });
+  await route(viaVerify, w.ctx);
+  assert.match(lastText(viaVerify), /Manage Roles/);
+
+  const lowMod = w.guild.member('lowmod', { roles: [w.guild.makeRole('Helper', 4)], perms: P.ManageGuild | P.ManageRoles });
+  const above = command({ guild: w.guild, member: lowMod, channel: w.general, commandName: 'roles', subcommand: 'panel', options: { channel: w.general, role1: adminRole } });
+  await route(above, w.ctx);
+  assert.match(lastText(above), /below your own highest role/);
+  assert.equal(w.general.sent.length, 0, 'nothing posted');
+
+  const owner = command({ guild: w.guild, member: w.guild.owner, channel: w.general, commandName: 'roles', subcommand: 'panel', options: { channel: w.general, role1: adminRole } });
+  await route(owner, w.ctx);
+  assert.match(lastText(owner), /Role panel posted/);
 });
 
 test('verify: captcha flow, wrong then right answer', async () => {
@@ -248,6 +272,35 @@ test('stock: a deleted panel is forgotten, a re-posted panel replaces the old on
   shop.history.length = 0; // someone deleted the panel by hand
   await route(stock(w, w.admin, 'set', { item: 'Gem', quantity: 1 }), w.ctx);
   assert.equal(w.ctx.store.guild(w.guild.id).stock.panel, null);
+});
+
+test('stock: a refresh that fails on the old panel does not wipe a newer panel', async () => {
+  const { refreshPanel } = require('../src/commands/stock');
+  const w = world();
+  const shop = w.guild.textChannel('shop');
+  const g = w.ctx.store.guild(w.guild.id);
+  g.stock.panel = { channelId: shop.id, messageId: 'gone' }; // stale panel, fetch will 404
+  const realFetch = shop.messages.fetch;
+  shop.messages.fetch = async arg => {
+    g.stock.panel = { channelId: shop.id, messageId: 'new-panel' }; // /stock panel lands mid-refresh
+    return realFetch(arg);
+  };
+  await refreshPanel(w.guild, w.ctx);
+  assert.deepEqual(g.stock.panel, { channelId: shop.id, messageId: 'new-panel' });
+});
+
+test('stock panel warns when the restock role cannot actually be pinged', async () => {
+  const w = world();
+  const shop = w.guild.textChannel('shop');
+  shop.botPerms = new PermissionsBitField(PermissionsBitField.All).remove(P.Administrator, P.MentionEveryone).bitfield;
+  const quiet = w.guild.makeRole('Restock', 2);
+  const i = stock(w, w.admin, 'panel', { channel: shop, restock_ping: quiet });
+  await route(i, w.ctx);
+  assert.match(lastText(i), /won't notify/);
+  const loud = w.guild.makeRole('Restock2', 2, { mentionable: true });
+  const j = stock(w, w.admin, 'panel', { channel: shop, restock_ping: loud });
+  await route(j, w.ctx);
+  assert.doesNotMatch(lastText(j), /won't notify/);
 });
 
 test('stock list is capped to fit in one embed', () => {
