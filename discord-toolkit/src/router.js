@@ -1,6 +1,14 @@
 const { ephemeral } = require('./lib/util');
 
-// customIds look like "<command>:<action>:<arg>…", so each feature owns its own buttons and modals.
+// customIds look like "<command>:<action>:<arg>…", so each feature owns its own buttons, select menus and modals.
+function handlerTable(cmd, interaction) {
+  if (!cmd) return null;
+  if (interaction.isButton()) return cmd.buttons;
+  if (interaction.isStringSelectMenu?.()) return cmd.selects;
+  if (interaction.isModalSubmit()) return cmd.modals;
+  return null;
+}
+
 function buildRouter(commands) {
   const byName = new Map(commands.map(c => [c.data.name, c]));
 
@@ -16,10 +24,9 @@ function buildRouter(commands) {
         await cmd.execute(interaction, ctx);
         return;
       }
-      if (interaction.isButton() || interaction.isModalSubmit()) {
+      if (typeof interaction.customId === 'string') {
         const [name, action, ...args] = interaction.customId.split(':');
-        const cmd = byName.get(name);
-        const handler = (interaction.isButton() ? cmd?.buttons : cmd?.modals)?.[action];
+        const handler = handlerTable(byName.get(name), interaction)?.[action];
         if (!handler || !interaction.inCachedGuild()) return;
         await handler(interaction, ctx, args);
       }

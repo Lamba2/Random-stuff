@@ -39,6 +39,15 @@ client.once(Events.ClientReady, async c => {
   }
   const invite = c.generateInvite({ scopes: [OAuth2Scopes.Bot, OAuth2Scopes.ApplicationsCommands], permissions: INVITE_PERMISSIONS });
   console.log(`Invite link: ${invite}`);
+  // features with timers (giveaways, etc.) pick their schedules back up after a restart
+  for (const cmd of commands) {
+    if (!cmd.onReady) continue;
+    try {
+      await cmd.onReady(c, ctx);
+    } catch (err) {
+      console.error(`Startup for /${cmd.data.name} failed:`, err);
+    }
+  }
 });
 
 client.on(Events.InteractionCreate, interaction => route(interaction, ctx));

@@ -152,7 +152,7 @@ function makeGuild({ botPerms = PermissionsBitField.All, botRolePosition = 10 } 
   return guild;
 }
 
-function makeInteraction({ type, guild, member, channel = null, commandName, subcommand, options = {}, customId, fields = {} }) {
+function makeInteraction({ type, guild, member, channel = null, commandName, subcommand, options = {}, customId, fields = {}, values = [], message = null }) {
   const calls = [];
   const dms = [];
   const get = (name, required) => {
@@ -162,11 +162,12 @@ function makeInteraction({ type, guild, member, channel = null, commandName, sub
   };
   const i = {
     guild, guildId: guild.id, member, user: member.user, channel, channelId: channel?.id ?? null,
-    commandName, customId, memberPermissions: member.permissions,
+    commandName, customId, values, message, memberPermissions: member.permissions,
     replied: false, deferred: false, calls, dms,
     client: { users: { send: async (userId, payload) => { if (i.dmFails) throw new Error('Cannot send messages to this user'); dms.push({ userId, payload }); } } },
     isChatInputCommand: () => type === 'command',
     isButton: () => type === 'button',
+    isStringSelectMenu: () => type === 'select',
     isModalSubmit: () => type === 'modal',
     inCachedGuild: () => i.cached !== false,
     options: {
@@ -192,9 +193,14 @@ function makeInteraction({ type, guild, member, channel = null, commandName, sub
       calls.push(['followUp', p]);
     },
     update: async p => {
-      if (type !== 'button') throw new Error('update() is only for component interactions');
+      if (type !== 'button' && type !== 'select') throw new Error('update() is only for component interactions');
       if (i.replied || i.deferred) throw new Error('InteractionAlreadyReplied');
       i.replied = true; calls.push(['update', p]);
+    },
+    deferUpdate: async () => {
+      if (type !== 'button' && type !== 'select') throw new Error('deferUpdate() is only for component interactions');
+      if (i.replied || i.deferred) throw new Error('InteractionAlreadyReplied');
+      i.deferred = true; calls.push(['deferUpdate']);
     },
     showModal: async m => {
       if (i.replied || i.deferred) throw new Error('InteractionAlreadyReplied');
@@ -207,6 +213,7 @@ function makeInteraction({ type, guild, member, channel = null, commandName, sub
 const command = (o) => makeInteraction({ type: 'command', ...o });
 const button = (o) => makeInteraction({ type: 'button', ...o });
 const modal = (o) => makeInteraction({ type: 'modal', ...o });
+const select = (o) => makeInteraction({ type: 'select', ...o });
 
 // The last thing the user saw, flattened to text for easy assertions.
 function lastText(i) {
@@ -228,4 +235,4 @@ function makeCtx() {
 
 const tick = (ms = 15) => new Promise(r => setTimeout(r, ms));
 
-module.exports = { makeGuild, makeUser, makeMember, makeTextChannel, makeInteraction, command, button, modal, lastText, isEphemeral, tempStore, makeCtx, tick, PermissionsBitField };
+module.exports = { makeGuild, makeUser, makeMember, makeTextChannel, makeInteraction, command, button, modal, select, lastText, isEphemeral, tempStore, makeCtx, tick, PermissionsBitField };
