@@ -1,0 +1,19 @@
+{
+  "name": "discord-community-toolkit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tickets, verification, role panels, vouches and stock tracking for Discord servers.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2"
+  }
+}
